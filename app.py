@@ -10,6 +10,9 @@ from supabase import create_client
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 
+# TAMBAHKAN: Impor text splitter dari langchain
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 # ====== ENV ======
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,8 +26,8 @@ MODEL_NAME = os.environ.get("EMBED_MODEL", "intfloat/e5-small-v2")  # 384-dim
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 model = SentenceTransformer(MODEL_NAME)
 
-# ====== Chunker (versi clean) ======
-from chunker import ImprovedSemanticChunker, ChunkerConfig
+# HAPUS: Chunker lama tidak lagi digunakan
+# from chunker import ImprovedSemanticChunker, ChunkerConfig
 
 app = FastAPI()
 
@@ -32,10 +35,10 @@ app = FastAPI()
 # ===================== Schemas =====================
 class ProcessReq(BaseModel):
     document_id: str
-    target_chunk_size: Optional[int] = 500
-    min_chunk_size: Optional[int] = 200
-    max_chunk_size: Optional[int] = 800
-    overlap_ratio: Optional[float] = 0.1
+    target_chunk_size: Optional[int] = 1000
+    min_chunk_size: Optional[int] = 200 # Tidak digunakan oleh langchain, tapi simpan untuk kompatibilitas
+    max_chunk_size: Optional[int] = 2000 # Tidak digunakan oleh langchain
+    overlap_ratio: Optional[float] = 0.2
 
 class EmbedReq(BaseModel):
     text: str
@@ -65,15 +68,9 @@ def embed_passages(texts: List[str]) -> List[List[float]]:
     vecs = model.encode(texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False)
     return vecs.astype(np.float32).tolist()
 
-def _build_chunker(req: ProcessReq) -> ImprovedSemanticChunker:
-    cfg = ChunkerConfig(
-        target_chars=req.target_chunk_size or 500,
-        min_chars=req.min_chunk_size or 200,
-        max_chars=req.max_chunk_size or 800,
-        overlap_ratio=req.overlap_ratio or 0.10,
-        use_spacy=True,
-    )
-    return ImprovedSemanticChunker(cfg)
+# HAPUS: Fungsi _build_chunker tidak lagi diperlukan
+# def _build_chunker(req: ProcessReq) -> ImprovedSemanticChunker:
+#     ...
 
 def _keyword_boost(cands: List[Dict[str, Any]], question: str, boost: float = 0.15):
     qwords = set(re.findall(r"\b\w+\b", question.lower()))
@@ -136,9 +133,13 @@ def process_document(req: ProcessReq):
         sb.table("documents").update({"status": "error"}).eq("id", req.document_id).execute()
         return {"ok": False, "error": "empty text after extraction"}
 
-    # 4) chunk
-    chunker = _build_chunker(req)
-    chunks = chunker.chunk_text(text)
+    # 4) chunk (DIGANTI DENGAN LOGIKA LANGCHAIN)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=req.target_chunk_size,
+        chunk_overlap=int(req.target_chunk_size * req.overlap_ratio),
+        length_function=len
+    )
+    chunks = text_splitter.split_text(text)
     n_chunks = len(chunks)
 
     # 5) save chunks
@@ -165,32 +166,25 @@ def process_document(req: ProcessReq):
 # ===================== M4: Retrieval =====================
 @app.post("/search")
 def search(req: SearchReq):
-    """
-    Retrieve konteks untuk RAG.
-    1) embed query (e5, prefix 'query:')
-    2) RPC match_chunks (pgvector)
-    3) keyword boost + dedup
-    """
     q_vec = model.encode([f"query: {req.question}"], normalize_embeddings=True, show_progress_bar=False)[0]
     q_vec = q_vec.astype(np.float32).tolist()
 
-    # ambil kandidat lebih banyak untuk rerank
     match_count = max(20, req.top_k * 3)
-    rpc = sb.rpc(
-        "match_chunks",
-        {"query_embedding": q_vec, "match_count": match_count, "filter_document": req.filter_document_id},
-    ).execute()
+    rpc_params = {
+        "query_embedding": q_vec, 
+        "match_count": match_count
+    }
+    if req.filter_document_id:
+        rpc_params["filter_document"] = req.filter_document_id
 
-    items: List[Dict[str, Any]] = rpc.data or []  # [{document_id, chunk_index, content, similarity}, ...]
+    rpc = sb.rpc("match_chunks", rpc_params).execute()
 
-    # keyword boost + sort
+    items: List[Dict[str, Any]] = rpc.data or []
+
     items = _keyword_boost(items, req.question, boost=0.15)
-    # dedup
     items = _dedup_jaccard(items, thr=0.75)
-    # top_k
     items = items[: max(1, req.top_k)]
 
-    # rapikan output
     out = [
         {
             "document_id": it["document_id"],
