@@ -1,3 +1,13 @@
+# --- Wajib untuk PyTorch versi CPU ---
+# Memberitahu pip untuk mencari paket di URL khusus ini untuk versi CPU
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Secara eksplisit meminta versi CPU dari torch, torchvision, dan torchaudio
+torch
+torchvision
+torchaudio
+# ------------------------------------
+
 fastapi
 uvicorn
 numpy
@@ -6,6 +16,7 @@ supabase
 python-dotenv
 pypdf
 scikit-learn
-# opsional spaCy (lebih akurat untuk EN). Boleh dilepas kalau ingin ringan.
+
+# Opsional spaCy (lebih akurat untuk EN). Boleh dilepas kalau ingin ringan.
 spacy
 en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
