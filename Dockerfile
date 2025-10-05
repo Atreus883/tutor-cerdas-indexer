@@ -20,4 +20,4 @@ COPY . .
 
 # Langkah 7: Perintah untuk menjalankan aplikasi Anda saat container启动
 # Ganti 'main:app' dan port '8000' jika perlu, sesuaikan dengan proyek Anda
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
