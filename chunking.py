@@ -1,58 +1,65 @@
 # indexer/chunking.py
-import pysbd
+import re
 from typing import List, Dict
+import pysbd
 
-def chunk_text_with_metadata(text_with_pages: List[Dict]) -> List[Dict]:
+def create_chunks(text_with_pages: List[Dict], target_chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Dict]:
     """
-    Menerima daftar teks per halaman, memecahnya menjadi kalimat, lalu
-    menggabungkannya menjadi chunk yang lebih besar dengan metadata halaman.
+    Strategi chunking hibrida terbaik untuk berbagai jenis dokumen.
+    Menggabungkan pemisahan berbasis paragraf dan kalimat untuk hasil yang optimal.
     """
+    all_semantic_units = []
     seg = pysbd.Segmenter(language="en", clean=False)
-    
-    all_sentences_with_pages = []
+
+    # Tahap 1: Pecah teks menjadi unit semantik (kalimat atau baris pendek)
     for item in text_with_pages:
         page_num = item['page']
-        page_text = item['text']
-        sentences = seg.segment(page_text)
-        for sent in sentences:
-            all_sentences_with_pages.append({'sentence': sent, 'page': page_num})
+        page_text = item.get('text', '')
+
+        # Bersihkan spasi berlebih dan ganti baris baru ganda dengan penanda paragraf
+        clean_text = re.sub(r'\s+', ' ', page_text).strip()
+        paragraphs = page_text.split('\n\n') # Asumsikan paragraf dipisah oleh dua baris baru
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
             
+            # Gunakan pysbd untuk memecah paragraf menjadi kalimat
+            sentences = seg.segment(para)
+            for sent in sentences:
+                sent = sent.strip()
+                if sent:
+                    all_semantic_units.append({'text': sent, 'page': page_num})
+
+    # Tahap 2: Gabungkan unit semantik menjadi chunk dengan ukuran target
     chunks = []
-    current_chunk = ""
-    chunk_pages = set()
-    
-    target_chunk_size = 1000  # Karakter per chunk (bisa disesuaikan)
-    overlap_sentences = 2 # Jumlah kalimat tumpang tindih untuk konteks
+    current_chunk_text = ""
+    current_chunk_pages = set()
 
-    i = 0
-    while i < len(all_sentences_with_pages):
-        sentence_data = all_sentences_with_pages[i]
-        sentence_text = sentence_data['sentence']
-        page_num = sentence_data['page']
-
-        if len(current_chunk) + len(sentence_text) <= target_chunk_size:
-            current_chunk += " " + sentence_text
-            chunk_pages.add(page_num)
-            i += 1
+    for i, unit in enumerate(all_semantic_units):
+        # Jika chunk kosong, mulai dengan unit saat ini
+        if not current_chunk_text:
+            current_chunk_text = unit['text']
+            current_chunk_pages.add(unit['page'])
+        # Jika menambahkan unit berikutnya tidak akan melebihi target, gabungkan
+        elif len(current_chunk_text) + len(unit['text']) + 1 <= target_chunk_size:
+            current_chunk_text += " " + unit['text']
+            current_chunk_pages.add(unit['page'])
+        # Jika chunk sudah penuh, simpan dan mulai chunk baru dengan overlap
         else:
-            # Chunk sudah penuh, simpan dan siapkan chunk baru dengan overlap
-            chunk_page_str = ", ".join(sorted([str(p) for p in chunk_pages]))
-            chunks.append({
-                'content': current_chunk.strip(),
-                'metadata': {'pages': chunk_page_str}
-            })
+            page_str = ", ".join(sorted([str(p) for p in current_chunk_pages]))
+            chunks.append({'content': current_chunk_text, 'metadata': {'pages': page_str}})
             
-            # Reset untuk chunk berikutnya dengan overlap
-            overlap_start_index = max(0, i - overlap_sentences)
-            current_chunk = " ".join([s['sentence'] for s in all_sentences_with_pages[overlap_start_index:i]])
-            chunk_pages = set([s['page'] for s in all_sentences_with_pages[overlap_start_index:i]])
+            # Mulai chunk baru dengan sedikit overlap untuk menjaga konteks
+            # Ambil beberapa unit terakhir dari chunk sebelumnya
+            overlap_units = [u['text'] for u in all_semantic_units[max(0, i-2):i+1]]
+            current_chunk_text = " ".join(overlap_units)
+            current_chunk_pages = set([u['page'] for u in all_semantic_units[max(0, i-2):i+1]])
 
-    # Simpan sisa chunk terakhir
-    if current_chunk:
-        chunk_page_str = ", ".join(sorted([str(p) for p in chunk_pages]))
-        chunks.append({
-            'content': current_chunk.strip(),
-            'metadata': {'pages': chunk_page_str}
-        })
-        
+    # Jangan lupa simpan chunk terakhir
+    if current_chunk_text:
+        page_str = ", ".join(sorted([str(p) for p in current_chunk_pages]))
+        chunks.append({'content': current_chunk_text, 'metadata': {'pages': page_str}})
+
     return chunks

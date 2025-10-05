@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 from typing import List, Dict
 
-from chunking import chunk_text_with_metadata
+from chunking import create_chunks
 
 # Inisialisasi model dan Supabase client
 MODEL_NAME = os.environ.get("EMBED_MODEL", "intfloat/e5-small-v2")
@@ -44,7 +44,7 @@ def process_document_in_background(document_id: str, bucket_name: str):
         text_with_pages = [{'page': i + 1, 'text': page.extract_text()} for i, page in enumerate(reader.pages)]
         
         # 5. Lakukan chunking cerdas
-        chunks_with_metadata = chunk_text_with_metadata(text_with_pages)
+        chunks_with_metadata = create_chunks(text_with_pages)
         if not chunks_with_metadata:
             raise ValueError("No chunks were created from the document.")
 
