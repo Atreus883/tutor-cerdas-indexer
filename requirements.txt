@@ -1,5 +1,3 @@
-# indexer/requirements.txt
-
 # --- Wajib untuk PyTorch versi CPU ---
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
@@ -9,10 +7,9 @@ torchaudio
 
 fastapi
 uvicorn
-numpy
-sentence-transformers
 supabase
+sentence-transformers
 python-dotenv
 pypdf
 scikit-learn
-langchain # <-- Ganti spaCy dengan ini
+pysbd # Library untuk sentence splitting yang ringan dan akurat
