@@ -1,14 +1,15 @@
-# indexer/processing.py (Versi dengan Logging Diagnostik)
+# indexer/processing.py
 import os
-import tempfile
+import io
 import numpy as np
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
-from typing import List
-import json # Tambahkan import json untuk print yang lebih rapi
+from pypdf import PdfReader
+from typing import List, Dict
 
-from chunking import chunk_document_by_layout
+from chunking import create_chunks
 
+# Inisialisasi model dan Supabase client
 MODEL_NAME = os.environ.get("EMBED_MODEL", "intfloat/e5-small-v2")
 model = SentenceTransformer(MODEL_NAME)
 
@@ -24,69 +25,71 @@ def embed_passages(texts: List[str]) -> List[List[float]]:
 
 def process_document_in_background(document_id: str, bucket_name: str):
     sb = get_supabase_client()
-    print(f"--- Starting ADVANCED processing for document_id: {document_id} ---")
+    print(f"Starting background processing for document_id: {document_id}")
 
     try:
+        # 1. Update status menjadi 'processing'
         sb.table("documents").update({"status": "processing"}).eq("id", document_id).execute()
 
-        doc = sb.table("documents").select("storage_path, title").eq("id", document_id).single().execute().data
+        # 2. Ambil path file
+        doc = sb.table("documents").select("storage_path").eq("id", document_id).single().execute().data
         if not doc or not doc.get("storage_path"):
             raise ValueError("Document path not found.")
         
+        # 3. Download file
         file_bytes = sb.storage.from_(bucket_name).download(doc["storage_path"])
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as temp_pdf:
-            temp_pdf.write(file_bytes)
-            temp_pdf.flush()
-            
-            print("--- Step 1: Running layout-aware chunking with 'unstructured' ---")
-            chunks = chunk_document_by_layout(temp_pdf.name)
-            print(f"--- Step 2: Chunking complete. Found {len(chunks)} potential chunks. ---")
+        # 4. Ekstrak teks halaman per halaman (filter halaman kosong)
+        reader = PdfReader(io.BytesIO(file_bytes))
+        text_with_pages = [
+            {'page': i + 1, 'text': page.extract_text()}
+            for i, page in enumerate(reader.pages)
+            if (page.extract_text() or "").strip()
+        ]
+        
+        if not text_with_pages:
+            raise ValueError("No text could be extracted from any page.")
 
-        # ==========================================================
-        # DEBUGGING: Cetak isi mentah dari variabel chunks
-        # ==========================================================
-        print("--- DEBUG: Raw chunks data before filtering and embedding: ---")
-        # Menggunakan json.dumps agar outputnya lebih mudah dibaca di log
-        print(json.dumps(chunks, indent=2))
-        print("--- END DEBUG ---")
-        # ==========================================================
-
+        # 5. Lakukan chunking cerdas
+        chunks = create_chunks(text_with_pages)
         if not chunks:
-            raise ValueError("No valid chunks could be created. The document might be empty or unparsable.")
+            raise ValueError("No valid chunks were created from the document.")
 
-        contents = [item['content'] for item in chunks if (item.get('content') or "").strip()]
-        if not contents:
-            raise ValueError("After filtering, no chunks with valid content were found.")
+        # ==========================================================
+        # PERUBAHAN UTAMA: Gabungkan semua proses menjadi SATU UPSERT
+        # ==========================================================
         
-        print(f"--- Step 3: Filtered down to {len(contents)} valid chunks. Starting embedding. ---")
+        # 6. Siapkan konten dari chunk yang sudah valid
+        contents = [item['content'] for item in chunks]
+        
+        # 7. Buat embeddings dari konten tersebut
         embeddings = embed_passages(contents)
-        print("--- Step 4: Embedding complete. Preparing data for database. ---")
         
-        # Rekonstruksi baris data HANYA dari chunk yang valid
-        valid_chunks = [item for item in chunks if (item.get('content') or "").strip()]
+        # 8. Siapkan baris data lengkap (content + embedding + metadata)
         rows_to_insert = [
             {
                 "document_id": document_id,
                 "chunk_index": i,
-                "content": valid_chunks[i]['content'],
+                "content": contents[i],
                 "embedding": embeddings[i],
-                "metadata": valid_chunks[i]['metadata']
+                "metadata": chunks[i].get('metadata') # Ambil metadata jika ada
             }
-            for i in range(len(valid_chunks))
+            for i in range(len(contents))
         ]
 
-        sb.table("chunks").delete().eq("id", document_id).execute()
+        # 9. Hapus chunk lama dan lakukan SATU KALI upsert dengan data lengkap
+        sb.table("chunks").delete().eq("document_id", document_id).execute()
         sb.table("chunks").upsert(rows_to_insert, on_conflict="document_id,chunk_index").execute()
-        print("--- Step 5: Successfully upserted chunks to database. ---")
+        # ==========================================================
         
+        # 10. Update status final menjadi 'embedded'
         sb.table("documents").update({
             "status": "embedded", 
-            "pages": valid_chunks[-1]['metadata']['pages'].split(',')[-1].strip() if valid_chunks else 0
+            "pages": len(reader.pages)
         }).eq("id", document_id).execute()
         
-        print(f"--- Successfully processed document_id: {document_id} with {len(valid_chunks)} chunks. ---")
+        print(f"Successfully processed document_id: {document_id}")
 
     except Exception as e:
-        print(f"--- ERROR during processing document {document_id}: {e} ---")
+        print(f"Error processing document {document_id}: {e}")
         sb.table("documents").update({"status": "error"}).eq("id", document_id).execute()
